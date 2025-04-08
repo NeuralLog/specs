@@ -85,44 +85,57 @@ async function checkLogIngestionAllowed(tenantId: string, count: number = 1): Pr
   if (!subscriptionJson) {
     return false; // No subscription
   }
-  
+
   const subscription = JSON.parse(subscriptionJson);
-  
+
   // Get plan
   const plan = subscriptionPlans.find(p => p.id === subscription.planId);
   if (!plan) {
     return false; // Plan not found
   }
-  
+
   // Get today's usage
   const today = new Date().toISOString().split('T')[0];
   const usageKey = `billing:usage:logs:${today}`;
   const currentUsage = parseInt(await redis.get(usageKey) || '0');
-  
+
   // Check if adding more logs would exceed the limit
   if (currentUsage + count > plan.features.maxLogsPerDay) {
     return false; // Limit exceeded
   }
-  
+
   return true;
 }
 
 // Track log usage
-async function trackLogUsage(tenantId: string, count: number = 1): Promise<void> {
+async function trackLogUsage(tenantId: string, count: number = 1, namespace?: string): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
+
+  // Base usage key (no namespace)
   const usageKey = `billing:usage:logs:${today}`;
-  
+
   // Increment usage counter
   await redis.incrby(usageKey, count);
-  
+
   // Set expiry for automatic cleanup (keep for 90 days)
   await redis.expire(usageKey, 90 * 24 * 60 * 60);
-  
+
   // Update monthly total
   const month = today.substring(0, 7); // YYYY-MM
   const monthlyKey = `billing:usage:logs:${month}`;
   await redis.incrby(monthlyKey, count);
   await redis.expire(monthlyKey, 366 * 24 * 60 * 60); // Keep for a year
+
+  // If namespace is provided, track namespace-specific usage
+  if (namespace) {
+    const namespaceUsageKey = `billing:usage:logs:${namespace}:${today}`;
+    await redis.incrby(namespaceUsageKey, count);
+    await redis.expire(namespaceUsageKey, 90 * 24 * 60 * 60);
+
+    const namespaceMonthlyKey = `billing:usage:logs:${namespace}:${month}`;
+    await redis.incrby(namespaceMonthlyKey, count);
+    await redis.expire(namespaceMonthlyKey, 366 * 24 * 60 * 60);
+  }
 }
 ```
 
@@ -143,12 +156,12 @@ async function initializeStripePlans(): Promise<void> {
   for (const plan of subscriptionPlans) {
     // Skip free plan
     if (plan.price === 0) continue;
-    
+
     // Create or update product
     let product;
     try {
       product = await stripe.products.retrieve(`product_${plan.id}`);
-      
+
       // Update product if it exists
       product = await stripe.products.update(`product_${plan.id}`, {
         name: plan.name,
@@ -168,7 +181,7 @@ async function initializeStripePlans(): Promise<void> {
         }
       });
     }
-    
+
     // Create or update price
     try {
       await stripe.prices.retrieve(`price_${plan.id}`);
@@ -200,15 +213,15 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // Get plan
   const plan = subscriptionPlans.find(p => p.id === planId);
   if (!plan) {
     throw new Error('Plan not found');
   }
-  
+
   // Free plan doesn't need Stripe
   if (plan.price === 0) {
     const subscription = {
@@ -218,11 +231,11 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
       currentPeriodStart: new Date(),
       currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
     };
-    
+
     await redis.set(`billing:subscription`, JSON.stringify(subscription));
     return subscription;
   }
-  
+
   // Create or get Stripe customer
   let customer;
   if (tenant.stripeCustomerId) {
@@ -235,24 +248,24 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
         tenantId
       }
     });
-    
+
     // Update tenant with Stripe customer ID
     tenant.stripeCustomerId = customer.id;
     await redis.set(`tenants:${tenantId}`, JSON.stringify(tenant));
   }
-  
+
   // Attach payment method to customer
   await stripe.paymentMethods.attach(paymentMethodId, {
     customer: customer.id
   });
-  
+
   // Set as default payment method
   await stripe.customers.update(customer.id, {
     invoice_settings: {
       default_payment_method: paymentMethodId
     }
   });
-  
+
   // Create subscription
   const stripeSubscription = await stripe.subscriptions.create({
     customer: customer.id,
@@ -265,7 +278,7 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
       tenantId
     }
   });
-  
+
   // Store subscription in Redis
   const subscription = {
     id: stripeSubscription.id,
@@ -275,9 +288,9 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
     currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
     stripeSubscriptionId: stripeSubscription.id
   };
-  
+
   await redis.set(`billing:subscription`, JSON.stringify(subscription));
-  
+
   return subscription;
 }
 
@@ -288,22 +301,22 @@ async function updateSubscription(tenantId: string, planId: string): Promise<any
   if (!subscriptionJson) {
     throw new Error('No subscription found');
   }
-  
+
   const subscription = JSON.parse(subscriptionJson);
-  
+
   // Get plan
   const plan = subscriptionPlans.find(p => p.id === planId);
   if (!plan) {
     throw new Error('Plan not found');
   }
-  
+
   // Handle transition to/from free plan
   if (plan.price === 0) {
     // Cancel Stripe subscription if exists
     if (subscription.stripeSubscriptionId) {
       await stripe.subscriptions.cancel(subscription.stripeSubscriptionId);
     }
-    
+
     // Create free subscription
     const freeSubscription = {
       id: `free-${tenantId}`,
@@ -312,19 +325,19 @@ async function updateSubscription(tenantId: string, planId: string): Promise<any
       currentPeriodStart: new Date(),
       currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
     };
-    
+
     await redis.set(`billing:subscription`, JSON.stringify(freeSubscription));
     return freeSubscription;
   }
-  
+
   // Handle paid plan
   if (!subscription.stripeSubscriptionId) {
     throw new Error('Cannot update subscription without payment method');
   }
-  
+
   // Update Stripe subscription
   const stripeSubscription = await stripe.subscriptions.retrieve(subscription.stripeSubscriptionId);
-  
+
   await stripe.subscriptions.update(subscription.stripeSubscriptionId, {
     items: [
       {
@@ -333,11 +346,11 @@ async function updateSubscription(tenantId: string, planId: string): Promise<any
       }
     ]
   });
-  
+
   // Update subscription in Redis
   subscription.planId = planId;
   await redis.set(`billing:subscription`, JSON.stringify(subscription));
-  
+
   return subscription;
 }
 
@@ -348,14 +361,14 @@ async function cancelSubscription(tenantId: string): Promise<void> {
   if (!subscriptionJson) {
     throw new Error('No subscription found');
   }
-  
+
   const subscription = JSON.parse(subscriptionJson);
-  
+
   // Cancel Stripe subscription if exists
   if (subscription.stripeSubscriptionId) {
     await stripe.subscriptions.cancel(subscription.stripeSubscriptionId);
   }
-  
+
   // Delete subscription from Redis
   await redis.del(`billing:subscription`);
 }
@@ -371,20 +384,20 @@ async function getPaymentMethods(tenantId: string): Promise<any[]> {
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // No Stripe customer ID means no payment methods
   if (!tenant.stripeCustomerId) {
     return [];
   }
-  
+
   // Get payment methods from Stripe
   const paymentMethods = await stripe.paymentMethods.list({
     customer: tenant.stripeCustomerId,
     type: 'card'
   });
-  
+
   return paymentMethods.data.map(pm => ({
     id: pm.id,
     brand: pm.card.brand,
@@ -402,9 +415,9 @@ async function addPaymentMethod(tenantId: string, paymentMethodId: string, setDe
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // Create Stripe customer if doesn't exist
   if (!tenant.stripeCustomerId) {
     const customer = await stripe.customers.create({
@@ -414,15 +427,15 @@ async function addPaymentMethod(tenantId: string, paymentMethodId: string, setDe
         tenantId
       }
     });
-    
+
     tenant.stripeCustomerId = customer.id;
   }
-  
+
   // Attach payment method to customer
   await stripe.paymentMethods.attach(paymentMethodId, {
     customer: tenant.stripeCustomerId
   });
-  
+
   // Set as default if requested
   if (setDefault) {
     await stripe.customers.update(tenant.stripeCustomerId, {
@@ -430,10 +443,10 @@ async function addPaymentMethod(tenantId: string, paymentMethodId: string, setDe
         default_payment_method: paymentMethodId
       }
     });
-    
+
     tenant.defaultPaymentMethodId = paymentMethodId;
   }
-  
+
   // Update tenant in Redis
   await redis.set(`tenants:${tenantId}`, JSON.stringify(tenant));
 }
@@ -445,19 +458,19 @@ async function removePaymentMethod(tenantId: string, paymentMethodId: string): P
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // No Stripe customer ID means no payment methods
   if (!tenant.stripeCustomerId) {
     throw new Error('No payment methods found');
   }
-  
+
   // Check if this is the default payment method
   if (tenant.defaultPaymentMethodId === paymentMethodId) {
     throw new Error('Cannot remove default payment method');
   }
-  
+
   // Detach payment method
   await stripe.paymentMethods.detach(paymentMethodId);
 }
@@ -472,12 +485,12 @@ async function removePaymentMethod(tenantId: string, paymentMethodId: string): P
 async function trackResourceUsage(tenantId: string, resourceType: string, quantity: number): Promise<void> {
   const today = new Date().toISOString().split('T')[0];
   const month = today.substring(0, 7); // YYYY-MM
-  
+
   // Daily usage
   const dailyKey = `billing:usage:${resourceType}:${today}`;
   await redis.incrby(dailyKey, quantity);
   await redis.expire(dailyKey, 90 * 24 * 60 * 60); // Keep for 90 days
-  
+
   // Monthly usage
   const monthlyKey = `billing:usage:${resourceType}:${month}`;
   await redis.incrby(monthlyKey, quantity);
@@ -485,13 +498,25 @@ async function trackResourceUsage(tenantId: string, resourceType: string, quanti
 }
 
 // Get usage statistics
-async function getUsageStatistics(tenantId: string, month: string): Promise<any> {
+async function getUsageStatistics(tenantId: string, month: string, namespace?: string): Promise<any> {
+  // Base keys (no namespace)
+  const logsKey = `billing:usage:logs:${month}`;
+  const storageKey = `billing:usage:storage:${month}`;
+  const apiCallsKey = `billing:usage:api:${month}`;
+
+  // If namespace is provided, use namespace-specific keys
+  if (namespace) {
+    logsKey = `billing:usage:logs:${namespace}:${month}`;
+    storageKey = `billing:usage:storage:${namespace}:${month}`;
+    apiCallsKey = `billing:usage:api:${namespace}:${month}`;
+  }
+
   // Get usage for each resource type
-  const logs = parseInt(await redis.get(`billing:usage:logs:${month}`) || '0');
-  const storage = parseInt(await redis.get(`billing:usage:storage:${month}`) || '0');
-  const apiCalls = parseInt(await redis.get(`billing:usage:api:${month}`) || '0');
-  
-  return {
+  const logs = parseInt(await redis.get(logsKey) || '0');
+  const storage = parseInt(await redis.get(storageKey) || '0');
+  const apiCalls = parseInt(await redis.get(apiCallsKey) || '0');
+
+  const result = {
     month,
     resources: {
       logs,
@@ -499,6 +524,32 @@ async function getUsageStatistics(tenantId: string, month: string): Promise<any>
       apiCalls
     }
   };
+
+  // If namespace is provided, include it in the result
+  if (namespace) {
+    result.namespace = namespace;
+  }
+
+  return result;
+}
+
+// Get usage statistics for all namespaces
+async function getNamespaceUsageStatistics(tenantId: string, month: string): Promise<any[]> {
+  // Get all namespaces
+  const namespaces = await redis.smembers('namespaces');
+
+  // Get usage statistics for each namespace
+  const results = [];
+
+  // Add total usage (no namespace)
+  results.push(await getUsageStatistics(tenantId, month));
+
+  // Add namespace-specific usage
+  for (const namespace of namespaces) {
+    results.push(await getUsageStatistics(tenantId, month, namespace));
+  }
+
+  return results;
 }
 ```
 
@@ -512,26 +563,34 @@ async function generateInvoice(tenantId: string, month: string): Promise<any> {
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // Get subscription
   const subscriptionJson = await redis.get(`billing:subscription`);
   if (!subscriptionJson) {
     throw new Error('No subscription found');
   }
-  
+
   const subscription = JSON.parse(subscriptionJson);
-  
+
   // Get plan
   const plan = subscriptionPlans.find(p => p.id === subscription.planId);
   if (!plan) {
     throw new Error('Plan not found');
   }
-  
+
   // Get usage statistics
   const usage = await getUsageStatistics(tenantId, month);
-  
+
+  // Get namespace usage if namespace support is enabled
+  let namespaceUsage = [];
+  if (tenant.features && tenant.features.namespaceSupport) {
+    namespaceUsage = await getNamespaceUsageStatistics(tenantId, month);
+    // Remove the first item which is the total usage (already included in usage)
+    namespaceUsage.shift();
+  }
+
   // Create invoice
   const invoice = {
     id: `inv-${tenantId}-${month}`,
@@ -549,16 +608,17 @@ async function generateInvoice(tenantId: string, month: string): Promise<any> {
       storage: usage.resources.storage,
       apiCalls: usage.resources.apiCalls
     },
+    namespaceUsage: namespaceUsage.length > 0 ? namespaceUsage : undefined,
     total: plan.price, // Base price only for MVP
     status: 'pending'
   };
-  
+
   // Store invoice in Redis
   await redis.set(`billing:invoices:${invoice.id}`, JSON.stringify(invoice));
-  
+
   // Add to invoice list
   await redis.sadd(`billing:tenant:invoices:${tenantId}`, invoice.id);
-  
+
   return invoice;
 }
 
@@ -568,23 +628,23 @@ async function getInvoice(tenantId: string, invoiceId: string): Promise<any> {
   if (!invoiceJson) {
     throw new Error('Invoice not found');
   }
-  
+
   return JSON.parse(invoiceJson);
 }
 
 // List invoices
 async function listInvoices(tenantId: string): Promise<any[]> {
   const invoiceIds = await redis.smembers(`billing:tenant:invoices:${tenantId}`);
-  
+
   if (invoiceIds.length === 0) {
     return [];
   }
-  
+
   const pipeline = redis.pipeline();
   for (const invoiceId of invoiceIds) {
     pipeline.get(`billing:invoices:${invoiceId}`);
   }
-  
+
   const results = await pipeline.exec();
   return results
     .filter(result => result[1])
@@ -613,9 +673,9 @@ app.use('/webhooks/stripe', express.raw({ type: 'application/json' }));
 // Stripe webhook endpoint
 app.post('/webhooks/stripe', async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  
+
   let event;
-  
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -625,7 +685,7 @@ app.post('/webhooks/stripe', async (req, res) => {
   } catch (err) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-  
+
   // Handle the event
   switch (event.type) {
     case 'invoice.payment_succeeded':
@@ -643,7 +703,7 @@ app.post('/webhooks/stripe', async (req, res) => {
     default:
       console.log(`Unhandled event type ${event.type}`);
   }
-  
+
   res.json({ received: true });
 });
 
@@ -651,17 +711,17 @@ app.post('/webhooks/stripe', async (req, res) => {
 async function handleInvoicePaymentSucceeded(invoice): Promise<void> {
   const tenantId = invoice.metadata.tenantId;
   if (!tenantId) return;
-  
+
   // Update invoice status
   const invoiceId = `inv-${tenantId}-${new Date(invoice.created * 1000).toISOString().substring(0, 7)}`;
   const invoiceJson = await redis.get(`billing:invoices:${invoiceId}`);
-  
+
   if (invoiceJson) {
     const invoiceData = JSON.parse(invoiceJson);
     invoiceData.status = 'paid';
     invoiceData.paidAt = new Date();
     invoiceData.stripeInvoiceId = invoice.id;
-    
+
     await redis.set(`billing:invoices:${invoiceId}`, JSON.stringify(invoiceData));
   }
 }
@@ -670,17 +730,17 @@ async function handleInvoicePaymentSucceeded(invoice): Promise<void> {
 async function handleInvoicePaymentFailed(invoice): Promise<void> {
   const tenantId = invoice.metadata.tenantId;
   if (!tenantId) return;
-  
+
   // Update invoice status
   const invoiceId = `inv-${tenantId}-${new Date(invoice.created * 1000).toISOString().substring(0, 7)}`;
   const invoiceJson = await redis.get(`billing:invoices:${invoiceId}`);
-  
+
   if (invoiceJson) {
     const invoiceData = JSON.parse(invoiceJson);
     invoiceData.status = 'failed';
     invoiceData.failedAt = new Date();
     invoiceData.stripeInvoiceId = invoice.id;
-    
+
     await redis.set(`billing:invoices:${invoiceId}`, JSON.stringify(invoiceData));
   }
 }
@@ -689,18 +749,18 @@ async function handleInvoicePaymentFailed(invoice): Promise<void> {
 async function handleSubscriptionUpdated(subscription): Promise<void> {
   const tenantId = subscription.metadata.tenantId;
   if (!tenantId) return;
-  
+
   // Get current subscription from Redis
   const subscriptionJson = await redis.get(`billing:subscription`);
   if (!subscriptionJson) return;
-  
+
   const currentSubscription = JSON.parse(subscriptionJson);
-  
+
   // Update subscription in Redis
   currentSubscription.status = subscription.status;
   currentSubscription.currentPeriodStart = new Date(subscription.current_period_start * 1000);
   currentSubscription.currentPeriodEnd = new Date(subscription.current_period_end * 1000);
-  
+
   await redis.set(`billing:subscription`, JSON.stringify(currentSubscription));
 }
 
@@ -708,13 +768,13 @@ async function handleSubscriptionUpdated(subscription): Promise<void> {
 async function handleSubscriptionDeleted(subscription): Promise<void> {
   const tenantId = subscription.metadata.tenantId;
   if (!tenantId) return;
-  
+
   // Get current subscription from Redis
   const subscriptionJson = await redis.get(`billing:subscription`);
   if (!subscriptionJson) return;
-  
+
   const currentSubscription = JSON.parse(subscriptionJson);
-  
+
   // Only delete if it's the same subscription
   if (currentSubscription.stripeSubscriptionId === subscription.id) {
     // Create free plan subscription
@@ -725,7 +785,7 @@ async function handleSubscriptionDeleted(subscription): Promise<void> {
       currentPeriodStart: new Date(),
       currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
     };
-    
+
     await redis.set(`billing:subscription`, JSON.stringify(freeSubscription));
   }
 }
@@ -749,11 +809,11 @@ export default async function BillingDashboardPage() {
   const invoices = await listInvoices();
   const currentMonth = new Date().toISOString().substring(0, 7);
   const usage = await getUsageStatistics(currentMonth);
-  
+
   return (
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold mb-6">Billing Dashboard</h1>
-      
+
       {/* Subscription Information */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <h2 className="text-xl font-semibold mb-4">Subscription</h2>
@@ -783,7 +843,7 @@ export default async function BillingDashboardPage() {
           </button>
         </div>
       </div>
-      
+
       {/* Usage Information */}
       <div className="bg-white rounded-lg shadow p-6 mb-6">
         <h2 className="text-xl font-semibold mb-4">Current Usage</h2>
@@ -802,7 +862,7 @@ export default async function BillingDashboardPage() {
           </div>
         </div>
       </div>
-      
+
       {/* Invoices */}
       <div className="bg-white rounded-lg shadow p-6">
         <h2 className="text-xl font-semibold mb-4">Invoices</h2>

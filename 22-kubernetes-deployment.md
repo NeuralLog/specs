@@ -285,90 +285,117 @@ spec:
 
 ## Data Services
 
-### PostgreSQL
+### Redis
 
 ```yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: postgresql
+  name: redis
   namespace: neurallog-data
 spec:
-  serviceName: postgresql
+  serviceName: redis
   replicas: 3
   selector:
     matchLabels:
-      app: postgresql
+      app: redis
   template:
     metadata:
       labels:
-        app: postgresql
+        app: redis
     spec:
       containers:
-      - name: postgresql
-        image: postgres:14
+      - name: redis
+        image: redis:7.0-alpine
         ports:
-        - containerPort: 5432
+        - containerPort: 6379
         env:
-        - name: POSTGRES_PASSWORD
+        - name: REDIS_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: postgresql-credentials
+              name: redis-credentials
               key: password
+        args:
+        - --requirepass
+        - $(REDIS_PASSWORD)
         volumeMounts:
-        - name: postgresql-data
-          mountPath: /var/lib/postgresql/data
+        - name: redis-data
+          mountPath: /data
   volumeClaimTemplates:
   - metadata:
-      name: postgresql-data
+      name: redis-data
     spec:
       accessModes: [ "ReadWriteOnce" ]
       resources:
         requests:
-          storage: 100Gi
+          storage: 20Gi
 ```
 
-### Elasticsearch
+### Tenant Redis Instance
 
 ```yaml
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: elasticsearch
-  namespace: neurallog-data
+  name: redis
+  namespace: tenant-123 # Each tenant gets their own namespace
 spec:
-  serviceName: elasticsearch
-  replicas: 3
+  serviceName: redis
+  replicas: 1
   selector:
     matchLabels:
-      app: elasticsearch
+      app: redis
   template:
     metadata:
       labels:
-        app: elasticsearch
+        app: redis
     spec:
       containers:
-      - name: elasticsearch
-        image: elasticsearch:8.6.0
+      - name: redis
+        image: redis:7.0-alpine
         ports:
-        - containerPort: 9200
-        - containerPort: 9300
+        - containerPort: 6379
         env:
-        - name: ES_JAVA_OPTS
-          value: "-Xms2g -Xmx2g"
-        - name: discovery.type
-          value: "single-node"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-credentials
+              key: password
+        args:
+        - --requirepass
+        - $(REDIS_PASSWORD)
         volumeMounts:
-        - name: elasticsearch-data
-          mountPath: /usr/share/elasticsearch/data
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /usr/local/etc/redis
+          readOnly: true
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
   volumeClaimTemplates:
   - metadata:
-      name: elasticsearch-data
+      name: redis-data
     spec:
       accessModes: [ "ReadWriteOnce" ]
       resources:
         requests:
-          storage: 200Gi
+          storage: 10Gi
+```
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: tenant-123
+data:
+  redis.conf: |
+    appendonly yes
+    appendfsync everysec
+    maxmemory 1gb
+    maxmemory-policy allkeys-lru
 ```
 
 ## Scaling Configuration
@@ -495,25 +522,22 @@ tenant:
     pods: 50
     cpu: 10
     memory: 20Gi
+  namespaceSupport:
+    enabled: true
+    default: false
 
 # Data services configuration
-postgresql:
-  enabled: true
-  persistence:
-    size: 100Gi
-  replicaCount: 3
-
-elasticsearch:
-  enabled: true
-  persistence:
-    size: 200Gi
-  replicaCount: 3
-
 redis:
   enabled: true
   persistence:
     size: 20Gi
   replicaCount: 3
+  password: true
+  config:
+    maxmemory: 2gb
+    maxmemoryPolicy: allkeys-lru
+    appendonly: "yes"
+    appendfsync: everysec
 ```
 
 ## Deployment Scenarios
@@ -523,22 +547,20 @@ redis:
 For cloud-hosted deployments, NeuralLog uses:
 
 1. **Managed Kubernetes**: EKS, GKE, or AKS
-2. **Managed Databases**: RDS, Cloud SQL, or Azure Database
-3. **Managed Elasticsearch**: Elasticsearch Service
-4. **Managed Redis**: ElastiCache, Memorystore, or Azure Cache
-5. **Cloud Storage**: S3, GCS, or Azure Blob Storage
-6. **CDN**: CloudFront, Cloud CDN, or Azure CDN
+2. **Managed Redis**: ElastiCache, Memorystore, or Azure Cache for Redis
+3. **Cloud Storage**: S3, GCS, or Azure Blob Storage
+4. **CDN**: CloudFront, Cloud CDN, or Azure CDN
+5. **Identity Management**: Cognito, Firebase Auth, or Azure AD B2C
 
 ### Self-Hosted Deployment
 
 For self-hosted deployments, NeuralLog supports:
 
 1. **On-Premises Kubernetes**: Standard Kubernetes clusters
-2. **Local Databases**: Self-managed PostgreSQL
-3. **Local Elasticsearch**: Self-managed Elasticsearch
-4. **Local Redis**: Self-managed Redis
-5. **Local Storage**: Local persistent volumes
-6. **Ingress**: NGINX Ingress Controller
+2. **Self-Managed Redis**: Redis instances deployed in tenant namespaces
+3. **Local Storage**: Local persistent volumes
+4. **Ingress**: NGINX Ingress Controller
+5. **Authentication**: OpenID Connect integration with identity providers
 
 ## Implementation Guidelines
 
