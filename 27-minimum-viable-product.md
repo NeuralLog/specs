@@ -36,6 +36,8 @@ This specification defines the Minimum Viable Product (MVP) for NeuralLog, focus
 │  │ Service     │  │                                     │   │
 │  │             │  │ • Each tenant gets isolated         │   │
 │  │             │  │   namespace with Redis instance     │   │
+│  │             │  │ • Optional namespace support        │   │
+│  │             │  │   within tenant Redis               │   │
 │  └─────────────┘  └─────────────────────────────────────┘   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
@@ -98,6 +100,7 @@ A single Next.js application with three main interfaces:
 - **Log Retrieval**: Simple log retrieval API
 - **Log Search**: Basic search by level, source, and time range
 - **Log Viewer**: Simple web-based log viewer
+- **Optional Namespace Support**: Organization of logs within a tenant
 
 ### MCP Features
 
@@ -169,37 +172,40 @@ const redis = new Redis(process.env.REDIS_URL);
 // Log ingestion endpoint
 app.post('/logs', async (req, res) => {
   const log = req.body;
-  
+  const namespace = req.query.namespace as string;
+
   // Validate log
   if (!log.level || !log.message) {
     return res.status(400).json({ error: 'Invalid log format' });
   }
-  
+
   // Add timestamp if not provided
   if (!log.timestamp) {
     log.timestamp = Date.now();
   }
-  
-  // Store log
-  const logId = await storeLog(log);
-  
+
+  // Store log (with optional namespace)
+  const logId = await storeLog(log, namespace);
+
   res.status(200).json({ id: logId });
 });
 
 // Log retrieval endpoint
 app.get('/logs/:id', async (req, res) => {
   const logId = req.params.id;
-  const log = await getLog(logId);
-  
+  const namespace = req.query.namespace as string;
+  const log = await getLog(logId, namespace);
+
   if (!log) {
     return res.status(404).json({ error: 'Log not found' });
   }
-  
+
   res.status(200).json(log);
 });
 
 // Log search endpoint
 app.get('/logs', async (req, res) => {
+  const namespace = req.query.namespace as string;
   const query = {
     level: req.query.level,
     source: req.query.source,
@@ -207,10 +213,27 @@ app.get('/logs', async (req, res) => {
     endTime: req.query.endTime ? parseInt(req.query.endTime as string) : undefined,
     limit: req.query.limit ? parseInt(req.query.limit as string) : 100
   };
-  
-  const logs = await searchLogs(query);
-  
+
+  const logs = await searchLogs(query, namespace);
+
   res.status(200).json({ logs, total: logs.length });
+});
+
+// Namespace management endpoints (when namespace support is enabled)
+app.post('/namespaces', async (req, res) => {
+  const { name } = req.body;
+
+  if (!name) {
+    return res.status(400).json({ error: 'Namespace name is required' });
+  }
+
+  await createNamespace(name);
+  res.status(201).json({ name });
+});
+
+app.get('/namespaces', async (req, res) => {
+  const namespaces = await listNamespaces();
+  res.status(200).json({ namespaces });
 });
 
 app.listen(3000, () => {
@@ -238,8 +261,9 @@ server.tool("neurallog.log", {
   message: z.string(),
   metadata: z.record(z.any()).optional(),
   source: z.string().optional(),
-  tags: z.array(z.string()).optional()
-}, async ({ level, message, metadata, source, tags }) => {
+  tags: z.array(z.string()).optional(),
+  namespace: z.string().optional()
+}, async ({ level, message, metadata, source, tags, namespace }) => {
   // Create log entry
   const log = {
     level,
@@ -249,10 +273,10 @@ server.tool("neurallog.log", {
     tags,
     timestamp: Date.now()
   };
-  
-  // Store log
-  const logId = await storeLog(log);
-  
+
+  // Store log (with optional namespace)
+  const logId = await storeLog(log, namespace);
+
   return { success: true, logId };
 });
 
@@ -263,8 +287,9 @@ server.tool("neurallog.search", {
   source: z.string().optional(),
   startTime: z.number().optional(),
   endTime: z.number().optional(),
-  limit: z.number().optional()
-}, async ({ query, level, source, startTime, endTime, limit }) => {
+  limit: z.number().optional(),
+  namespace: z.string().optional()
+}, async ({ query, level, source, startTime, endTime, limit, namespace }) => {
   // Search logs
   const logs = await searchLogs({
     level,
@@ -272,9 +297,22 @@ server.tool("neurallog.search", {
     startTime,
     endTime,
     limit: limit || 100
-  });
-  
+  }, namespace);
+
   return { logs, total: logs.length };
+});
+
+// Register namespace management tools
+server.tool("neurallog.namespaces.list", {}, async () => {
+  const namespaces = await listNamespaces();
+  return { namespaces };
+});
+
+server.tool("neurallog.namespaces.create", {
+  name: z.string()
+}, async ({ name }) => {
+  await createNamespace(name);
+  return { success: true, name };
 });
 
 // Connect to stdio transport
@@ -461,15 +499,15 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
   if (!tenantJson) {
     throw new Error('Tenant not found');
   }
-  
+
   const tenant = JSON.parse(tenantJson);
-  
+
   // Get plan
   const plan = subscriptionPlans.find(p => p.id === planId);
   if (!plan) {
     throw new Error('Plan not found');
   }
-  
+
   // Free plan doesn't need Stripe
   if (plan.price === 0) {
     const subscription = {
@@ -479,11 +517,11 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
       currentPeriodStart: new Date(),
       currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
     };
-    
+
     await redis.set(`billing:subscription`, JSON.stringify(subscription));
     return subscription;
   }
-  
+
   // Create or get Stripe customer
   let customer;
   if (tenant.stripeCustomerId) {
@@ -496,24 +534,24 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
         tenantId
       }
     });
-    
+
     // Update tenant with Stripe customer ID
     tenant.stripeCustomerId = customer.id;
     await redis.set(`tenants:${tenantId}`, JSON.stringify(tenant));
   }
-  
+
   // Attach payment method to customer
   await stripe.paymentMethods.attach(paymentMethodId, {
     customer: customer.id
   });
-  
+
   // Set as default payment method
   await stripe.customers.update(customer.id, {
     invoice_settings: {
       default_payment_method: paymentMethodId
     }
   });
-  
+
   // Create subscription
   const stripeSubscription = await stripe.subscriptions.create({
     customer: customer.id,
@@ -526,7 +564,7 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
       tenantId
     }
   });
-  
+
   // Store subscription in Redis
   const subscription = {
     id: stripeSubscription.id,
@@ -536,9 +574,9 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
     currentPeriodEnd: new Date(stripeSubscription.current_period_end * 1000),
     stripeSubscriptionId: stripeSubscription.id
   };
-  
+
   await redis.set(`billing:subscription`, JSON.stringify(subscription));
-  
+
   return subscription;
 }
 ```
@@ -572,6 +610,42 @@ async function createSubscription(tenantId: string, planId: string, paymentMetho
 2. Set up Stripe integration
 3. Perform end-to-end testing
 4. Deploy to production
+
+## Tenant Isolation and Namespace Support
+
+### Tenant Isolation
+
+In NeuralLog's MVP, tenant isolation is implemented at the Kubernetes namespace level. Each tenant gets their own dedicated Kubernetes namespace containing all their services and data stores. This approach provides strong isolation between tenants without requiring tenant IDs to be encoded in data keys.
+
+```yaml
+# Example tenant namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tenant-123
+  labels:
+    tenant: "123"
+```
+
+### Optional Namespace Support
+
+Within each tenant's isolated environment, NeuralLog provides optional namespace support for further organization of logs. This feature allows tenants to categorize logs by application, environment, team, or any other logical grouping.
+
+```typescript
+// Enable namespace support for a tenant
+async function enableNamespaceSupport(tenantId: string): Promise<void> {
+  const tenantJson = await redis.get(`tenants:${tenantId}`);
+  if (!tenantJson) {
+    throw new Error('Tenant not found');
+  }
+
+  const tenant = JSON.parse(tenantJson);
+  tenant.features = tenant.features || {};
+  tenant.features.namespaceSupport = true;
+
+  await redis.set(`tenants:${tenantId}`, JSON.stringify(tenant));
+}
+```
 
 ## MVP Limitations
 
