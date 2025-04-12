@@ -129,11 +129,13 @@ The API Layer provides interfaces for interacting with the system.
 
 ## Cross-Cutting Concerns
 
-### Security
-- Authentication and authorization
-- Data encryption
-- Audit logging
-- Secure defaults
+### Zero-Knowledge Security
+- Client-side encryption for all data
+- Deterministic hierarchical key derivation
+- Searchable encryption for encrypted data
+- Zero server knowledge of plaintext or keys
+- M-of-N key sharing for administrative access
+- Complete tenant isolation through cryptography
 
 ### Scalability
 - Horizontal scaling of components
@@ -181,15 +183,18 @@ The API Layer provides interfaces for interacting with the system.
 - Monitoring systems
 - Notification services
 
-## Data Flow
+## Zero-Knowledge Data Flow
 
-1. Logs are ingested through transport adapters
-2. Logs are normalized and stored
-3. Analysis layer processes logs
-4. Condition system evaluates logs against conditions
-5. Rule engine determines which rules should trigger
-6. Action system executes actions for triggered rules
-7. Results are stored and made available through the API
+1. Client application generates log data
+2. SDK encrypts log content client-side using derived encryption keys
+3. SDK generates search tokens for searchable terms
+4. Encrypted logs and search tokens are sent to the server
+5. Server stores encrypted logs and indexes search tokens
+6. Server performs analysis on search tokens without decryption
+7. Client requests logs with search queries
+8. Server matches search tokens and returns encrypted logs
+9. Client decrypts logs client-side for viewing
+10. Zero-knowledge reports are generated from token patterns
 
 ## Performance Considerations
 

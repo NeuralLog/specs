@@ -48,7 +48,7 @@ async function deriveKey(masterSecret, path) {
     false,
     ["deriveBits"]
   );
-  
+
   // Derive key using HKDF
   return crypto.subtle.deriveBits(
     {
@@ -98,16 +98,16 @@ For enterprise deployments:
 async function generateApiKey(name, userId, tenantId, masterSecret) {
   // Generate a unique key ID
   const keyId = generateId();
-  
+
   // Derive the API key from the master secret
   const keyHierarchy = new KeyHierarchy(masterSecret);
   const apiKey = await keyHierarchy.deriveKey(
     `tenant/${tenantId}/user/${userId}/api-key/${keyId}`
   );
-  
+
   // Generate verification hash
   const apiKeyVerification = await generateVerificationHash(apiKey);
-  
+
   // Send only verification hash to server
   await fetch(`/api/apikeys`, {
     method: 'POST',
@@ -122,7 +122,7 @@ async function generateApiKey(name, userId, tenantId, masterSecret) {
       userId
     })
   });
-  
+
   return { apiKey, keyId };
 }
 ```
@@ -183,7 +183,7 @@ To enable multiple users in the same tenant to search the same logs:
 async function deriveSearchKey(apiKey, tenantId) {
   // 1. First derive a user-specific key from the API key
   const userKey = await deriveUserKey(apiKey);
-  
+
   // 2. Use the user key to authenticate to the server
   const response = await fetch('/api/tenant/search-key-material', {
     method: 'POST',
@@ -192,10 +192,10 @@ async function deriveSearchKey(apiKey, tenantId) {
       'X-Tenant-ID': tenantId
     }
   });
-  
+
   // 3. Get tenant-specific key material (same for all tenant users)
   const { keyMaterial } = await response.json();
-  
+
   // 4. Combine user key with tenant key material
   // This produces the same search key for all users in the tenant
   return await crypto.subtle.deriveKey(
@@ -256,6 +256,113 @@ Keys can be rotated while maintaining backward compatibility:
 3. **Verification Strength**: Verification hashes use strong algorithms (Argon2id)
 4. **Metadata Protection**: Even metadata should be protected from unauthorized access
 
+## M-of-N Key Sharing for Zero-Knowledge Reports
+
+NeuralLog implements secure m-of-n key sharing for transforming zero-knowledge reports to full knowledge:
+
+```javascript
+// Client-side
+async function requestReportTransformation(reportId, reason) {
+  // Create transformation request
+  const response = await fetch(`/api/reports/${reportId}/transform-request`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    },
+    body: JSON.stringify({ reason })
+  });
+
+  const { requestId } = await response.json();
+  return requestId;
+}
+
+// Client-side (approver)
+async function approveTransformation(requestId, approverKeyShare) {
+  // Submit approver's key share
+  await fetch(`/api/transform-requests/${requestId}/approve`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    },
+    body: JSON.stringify({ keyShare: approverKeyShare })
+  });
+}
+
+// Client-side (requester)
+async function getTransformedReport(requestId, reportId) {
+  // Check if enough approvals have been collected
+  const statusResponse = await fetch(`/api/transform-requests/${requestId}/status`, {
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    }
+  });
+
+  const { status, combinedKeyShares } = await statusResponse.json();
+
+  if (status !== 'approved') {
+    throw new Error('Not enough approvals yet');
+  }
+
+  // Get the encrypted report
+  const reportResponse = await fetch(`/api/reports/${reportId}`, {
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    }
+  });
+
+  const { encryptedReport } = await reportResponse.json();
+
+  // Reconstruct the decryption key from combined shares
+  const decryptionKey = reconstructKeyFromShares(combinedKeyShares);
+
+  // Decrypt the report
+  return decryptReport(encryptedReport, decryptionKey);
+}
+```
+
+## Web of Trust for Key Signing
+
+NeuralLog implements a web of trust mechanism for key signing:
+
+```javascript
+// Client-side
+async function signUserKey(userId, signerPrivateKey) {
+  // Get the user's public key
+  const response = await fetch(`/api/users/${userId}/public-key`, {
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    }
+  });
+
+  const { publicKey } = await response.json();
+
+  // Sign the user's public key
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    signerPrivateKey,
+    new TextEncoder().encode(publicKey)
+  );
+
+  // Store the signature
+  await fetch(`/api/users/${userId}/signatures`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'X-Tenant-ID': tenantId
+    },
+    body: JSON.stringify({
+      signature: arrayBufferToBase64(signature),
+      signerId: currentUserId
+    })
+  });
+}
+```
+
 ## Implementation Guidelines
 
 1. **Use Standard Libraries**: Rely on well-vetted cryptographic libraries
@@ -263,3 +370,8 @@ Keys can be rotated while maintaining backward compatibility:
 3. **Regular Audits**: Conduct regular security audits of the key management system
 4. **Defense in Depth**: Implement multiple layers of security
 5. **Secure Defaults**: Provide secure default configurations
+6. **Key Rotation**: Implement regular key rotation procedures
+7. **Metadata Protection**: Encrypt all sensitive metadata
+8. **Revocation Lists**: Maintain efficient revocation lists
+9. **Audit Logging**: Log all key management operations
+10. **Secure Recovery**: Implement secure key recovery mechanisms
