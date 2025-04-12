@@ -1,8 +1,8 @@
-# NeuralLog Authorization and RBAC Specification
+# NeuralLog: Zero-Knowledge Authorization and RBAC
 
 ## Overview
 
-This specification defines the Role-Based Access Control (RBAC) system for NeuralLog, providing a structured approach to managing permissions across the platform.
+NeuralLog implements a zero-knowledge Role-Based Access Control (RBAC) system that provides powerful access control capabilities while maintaining complete data privacy. This specification details the authorization model and implementation.
 
 ## Authorization Model
 
@@ -12,6 +12,31 @@ NeuralLog uses a multi-layered authorization model:
 2. **Organization-level boundaries**: Separation between organizations within a tenant
 3. **Role-based permissions**: User permissions based on assigned roles
 4. **Resource-level access control**: Fine-grained control over specific resources
+
+## Tenant Isolation Architecture
+
+NeuralLog implements a hybrid isolation model with both shared global components and dedicated tenant-specific components:
+
+### Global Shared Components (Multi-Tenant Aware)
+
+1. **Auth Service**: A single global auth service instance serving all tenants
+2. **OpenFGA**: A single global OpenFGA instance for authorization across all tenants
+3. **Auth0**: A single global Auth0 tenant for user authentication
+4. **PostgreSQL**: A single global database for OpenFGA and Auth Service data
+
+### Tenant-Specific Dedicated Components (Single-Tenant)
+
+1. **Web Server**: Dedicated web application instance per tenant
+2. **Logs Server**: Dedicated logs server instance per tenant
+3. **Redis**: One Redis instance per tenant, shared between auth and logs services
+
+### Isolation Mechanisms
+
+1. **Infrastructure Isolation**: Each tenant gets dedicated web, logs, and Redis instances
+2. **Namespace Isolation**: In Kubernetes, each tenant's components run in isolated namespaces
+3. **Network Isolation**: Network policies restrict communication between tenant namespaces
+4. **Logical Isolation**: OpenFGA enforces tenant boundaries through its authorization model
+5. **Data Namespacing**: Even in shared components, data is properly namespaced by tenant ID
 
 ## Role Definitions
 
@@ -110,21 +135,21 @@ function hasPermission(
 ): boolean {
   // Get all roles for the user in this context
   const roles = getRolesForUser(user.id, context.tenantId, context.organizationId);
-  
+
   // Get all permissions from these roles
   const permissions = getAllPermissionsForRoles(roles);
-  
+
   // Check for wildcard permission
   if (permissions.includes('*:*')) {
     return true;
   }
-  
+
   // Check for resource wildcard
   const [resource, action] = requiredPermission.split(':');
   if (permissions.includes(`${resource}:*`)) {
     return true;
   }
-  
+
   // Check for specific permission
   return permissions.includes(requiredPermission);
 }
@@ -133,6 +158,132 @@ function hasPermission(
 ## Role Hierarchy
 
 Roles can inherit permissions from parent roles:
+
+## OpenFGA Authorization Model
+
+The following is the enhanced OpenFGA authorization model that supports the RBAC system and tenant isolation:
+
+```json
+{
+  "type_definitions": [
+    {
+      "type": "tenant",
+      "relations": {
+        "admin": { "this": {} },
+        "member": { "this": {} },
+        "exists": { "this": {} }
+      }
+    },
+
+    {
+      "type": "organization",
+      "relations": {
+        "admin": { "this": {} },
+        "member": { "this": {} },
+        "parent": {
+          "type": "tenant"
+        }
+      },
+      "metadata": {
+        "relations": {
+          "parent": { "directly_related_user_types": [{ "type": "tenant" }] }
+        }
+      }
+    },
+
+    {
+      "type": "user",
+      "relations": {
+        "self": { "this": {} }
+      }
+    },
+
+    {
+      "type": "role",
+      "relations": {
+        "assignee": { "this": {} },
+        "parent": {
+          "type": "role"
+        }
+      },
+      "metadata": {
+        "relations": {
+          "parent": { "directly_related_user_types": [{ "type": "role" }] }
+        }
+      }
+    },
+
+    {
+      "type": "log",
+      "relations": {
+        "owner": { "this": {} },
+        "reader": {
+          "union": {
+            "child": [
+              { "this": {} },
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "writer": {
+          "union": {
+            "child": [
+              { "this": {} },
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "parent": {
+          "type": "organization"
+        }
+      },
+      "metadata": {
+        "relations": {
+          "parent": { "directly_related_user_types": [{ "type": "organization" }] }
+        }
+      }
+    },
+
+    {
+      "type": "apikey",
+      "relations": {
+        "owner": { "this": {} },
+        "manager": {
+          "union": {
+            "child": [
+              { "this": {} },
+              {
+                "computedUserset": {
+                  "object": "",
+                  "relation": "admin"
+                }
+              }
+            ]
+          }
+        },
+        "parent": {
+          "type": "user"
+        }
+      },
+      "metadata": {
+        "relations": {
+          "parent": { "directly_related_user_types": [{ "type": "user" }] }
+        }
+      }
+    }
+  ]
+}
+```
 
 ```json
 {
@@ -146,10 +297,18 @@ Roles can inherit permissions from parent roles:
 }
 ```
 
+## Zero-Knowledge RBAC Principles
+
+1. **Metadata-Level RBAC**: Access control implemented purely through metadata
+2. **No Server Knowledge**: Server never possesses encryption keys or plaintext
+3. **Deterministic Key Hierarchy**: Keys derived from master secret using deterministic paths
+4. **Immediate Revocation**: Access can be revoked instantly through metadata updates
+5. **Comprehensive Audit**: Complete audit trail of all RBAC changes
+
 ## Implementation Guidelines
 
-1. **Centralized Authorization Service**: Implement as a separate microservice
-2. **Caching**: Cache permission checks for performance
-3. **Audit Logging**: Log all permission checks and changes
-4. **UI Integration**: Show/hide UI elements based on permissions
-5. **API Integration**: Validate permissions for all API calls
+1. **Zero Knowledge First**: Maintain zero-knowledge principles in all RBAC operations
+2. **Performance Focus**: Optimize RBAC checks for minimal latency
+3. **Scalability**: Design for horizontal scaling of RBAC components
+4. **Auditability**: Maintain comprehensive audit trails for all RBAC changes
+5. **Developer Experience**: Provide intuitive APIs for RBAC management
