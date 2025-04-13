@@ -6,14 +6,17 @@ NeuralLog is a distributed system designed for logging and monitoring AI model i
 
 NeuralLog consists of several independent components:
 
-- **server**: The logs server implementation
-- **web**: The web application frontend
+- **typescript-client-sdk**: The cornerstone of NeuralLog's zero-knowledge architecture, handling all client-side encryption, decryption, and key management
+- **server**: The logs server implementation for storing encrypted logs
+- **web**: The web application frontend that uses the client SDK for all cryptographic operations
 - **auth**: The authentication and authorization service
 - **shared**: Common types and utilities
-- **typescript**: TypeScript SDK for client applications
+- **typescript**: TypeScript SDK for client applications, built on the client SDK
 - **specs**: Project specifications and GitHub issues
 - **docs**: Project documentation
 - **infra**: Infrastructure configuration
+
+See [TypeScript Client SDK: The Cornerstone of NeuralLog's Zero-Knowledge Architecture](typescript-client-sdk-cornerstone.md) for details on how the client SDK implements the zero-knowledge architecture.
 
 ## Getting Started
 
@@ -67,32 +70,47 @@ NeuralLog includes several utility scripts in the `infra/scripts` directory to h
 - **Start-All.ps1**: Start all components using Docker
 - **Stop-All.ps1**: Stop all components
 
-## SDK
+## Zero-Knowledge Client SDK
 
-NeuralLog provides a TypeScript SDK for client applications. To install the SDK:
+NeuralLog's TypeScript Client SDK is the cornerstone of our zero-knowledge architecture. It handles all encryption, decryption, and key management client-side, ensuring that sensitive data never leaves the client unencrypted.
+
+To install the SDK:
 
 ```powershell
 # Configure npm to use the private registry for @neurallog scope
 npm config set @neurallog:registry http://localhost:4873
 
-# Install the SDK
-npm install @neurallog/sdk --registry http://localhost:4873
+# Install the client SDK
+npm install @neurallog/client-sdk --registry http://localhost:4873
 ```
 
 Basic usage:
 
 ```typescript
-import { NeuralLog, LogLevel } from '@neurallog/sdk';
+import { NeuralLogClient } from '@neurallog/client-sdk';
 
-// Create a logger
-const logger = NeuralLog.Log('my-app');
+// Create a client
+const client = new NeuralLogClient({
+  tenantId: 'your-tenant-id'
+});
 
-// Log messages
-logger.info('Hello, world!');
-logger.error('Something went wrong', { error: 'Error details' });
+// Authenticate
+await client.authenticateWithApiKey('your-api-key');
+
+// Log encrypted data
+await client.log('application-logs', {
+  level: 'info',
+  message: 'Hello, world!',
+  timestamp: new Date().toISOString(),
+  metadata: { user: 'user123' }
+});
+
+// Retrieve and decrypt logs
+const logs = await client.getLogs('application-logs');
+console.log(logs);
 ```
 
-For more information, see the [SDK documentation](docs/NeuralLog%20Docs/docs/components/sdk.md).
+For more information, see the [TypeScript Client SDK documentation](typescript-client-sdk-cornerstone.md).
 
 ## Documentation
 

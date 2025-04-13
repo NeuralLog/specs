@@ -4,6 +4,17 @@
 
 This specification defines the comprehensive security model for the NeuralLog platform. It covers authentication, authorization, data protection, network security, and compliance considerations to ensure the platform maintains the highest security standards.
 
+## TypeScript Client SDK: The Cornerstone of Security
+
+The TypeScript Client SDK is the cornerstone of NeuralLog's security architecture. It implements a true zero-knowledge approach where:
+
+1. **All encryption and decryption happens client-side**: The server never sees plaintext data
+2. **Passwords never leave the client**: Authentication is handled through secure key derivation
+3. **API keys contain cryptographic material**: Used to derive encryption keys for logs
+4. **Search tokens are generated client-side**: Enabling search without revealing content
+
+This client-centric approach means that even if the entire server infrastructure were compromised, an attacker would still be unable to read logs without the proper API keys or master secrets.
+
 ## Security Architecture
 
 ```
@@ -217,13 +228,13 @@ async function authorizeApiRequest(req, res, next) {
     // Extract and validate JWT
     const token = extractTokenFromRequest(req);
     const decodedToken = await validateToken(token);
-    
+
     // Check permissions
     const requiredPermission = getRequiredPermissionForEndpoint(req.path, req.method);
     if (!hasPermission(decodedToken.permissions, requiredPermission)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
-    
+
     // Set user context for request
     req.user = {
       id: decodedToken.sub,
@@ -232,7 +243,7 @@ async function authorizeApiRequest(req, res, next) {
       roles: decodedToken.roles,
       permissions: decodedToken.permissions
     };
-    
+
     next();
   } catch (error) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -242,9 +253,15 @@ async function authorizeApiRequest(req, res, next) {
 
 ## Data Protection
 
-### 1. Data Encryption
+### 1. Zero-Knowledge Data Encryption
 
-NeuralLog implements encryption at multiple levels:
+NeuralLog implements a true zero-knowledge encryption model through the TypeScript Client SDK:
+
+- **Client-Side Encryption**:
+  - All encryption happens client-side via the TypeScript Client SDK
+  - Log names and log data are both encrypted before transmission
+  - Encryption keys are derived from API keys and never leave the client
+  - Search tokens are generated client-side for searchable encryption
 
 - **Data in Transit**:
   - TLS 1.3 for all communications
@@ -252,14 +269,14 @@ NeuralLog implements encryption at multiple levels:
   - Certificate management and rotation
 
 - **Data at Rest**:
-  - Database encryption
-  - File system encryption
-  - Encryption key management
+  - Only encrypted data is stored on the server
+  - The server never possesses encryption keys
+  - Even metadata is encrypted when sensitive
 
-- **Application-Level Encryption**:
-  - Field-level encryption for sensitive data
-  - End-to-end encryption options
-  - Client-side encryption capabilities
+- **End-to-End Encryption**:
+  - True end-to-end encryption for all log data
+  - No server-side decryption capabilities
+  - Decryption happens exclusively on authorized clients
 
 ### 2. Data Classification
 
@@ -561,15 +578,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
-    
+
     - name: SAST - Static Application Security Testing
       uses: github/codeql-action/analyze@v2
-      
+
     - name: Dependency Scanning
       uses: snyk/actions/node@master
       with:
         args: --severity-threshold=high
-      
+
     - name: Container Scanning
       uses: aquasecurity/trivy-action@master
       with:

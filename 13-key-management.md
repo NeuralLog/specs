@@ -4,11 +4,21 @@
 
 NeuralLog implements a deterministic hierarchical key management system that enables powerful security features while maintaining zero server knowledge. This specification details how keys are generated, managed, and used throughout the system.
 
+## The TypeScript Client SDK: Cornerstone of Zero-Knowledge
+
+The TypeScript Client SDK is the cornerstone of NeuralLog's zero-knowledge architecture. It implements all cryptographic operations client-side, ensuring that sensitive data and encryption keys never leave the client. This SDK:
+
+1. Handles all encryption and decryption operations
+2. Manages the key hierarchy and derivation
+3. Generates search tokens for searchable encryption
+4. Implements secure authentication without transmitting passwords
+5. Provides the foundation for all other language SDKs
+
 ## Core Principles
 
 1. **Zero Server Knowledge**: The server never possesses encryption keys or plaintext
 2. **Deterministic Key Hierarchy**: All keys derived from a master secret using deterministic paths
-3. **Client-Side Cryptography**: All cryptographic operations happen client-side
+3. **Client-Side Cryptography**: All cryptographic operations happen client-side via the TypeScript Client SDK
 4. **Metadata-Only Server**: Server stores only verification hashes and metadata
 5. **Immediate Revocation**: Keys can be revoked instantly through metadata updates
 
@@ -365,13 +375,16 @@ async function signUserKey(userId, signerPrivateKey) {
 
 ## Implementation Guidelines
 
-1. **Use Standard Libraries**: Rely on well-vetted cryptographic libraries
-2. **Avoid Custom Crypto**: Don't implement custom cryptographic algorithms
-3. **Regular Audits**: Conduct regular security audits of the key management system
-4. **Defense in Depth**: Implement multiple layers of security
-5. **Secure Defaults**: Provide secure default configurations
-6. **Key Rotation**: Implement regular key rotation procedures
-7. **Metadata Protection**: Encrypt all sensitive metadata
-8. **Revocation Lists**: Maintain efficient revocation lists
-9. **Audit Logging**: Log all key management operations
-10. **Secure Recovery**: Implement secure key recovery mechanisms
+1. **TypeScript Client SDK First**: Implement all cryptographic operations in the TypeScript Client SDK first, then port to other languages
+2. **Use Standard Libraries**: Rely on well-vetted cryptographic libraries
+3. **Avoid Custom Crypto**: Don't implement custom cryptographic algorithms
+4. **Client-Side Only**: Ensure all cryptographic operations happen exclusively client-side
+5. **Regular Audits**: Conduct regular security audits of the key management system
+6. **Defense in Depth**: Implement multiple layers of security
+7. **Secure Defaults**: Provide secure default configurations
+8. **Key Rotation**: Implement regular key rotation procedures
+9. **Metadata Protection**: Encrypt all sensitive metadata
+10. **Revocation Lists**: Maintain efficient revocation lists
+11. **Audit Logging**: Log all key management operations
+12. **Secure Recovery**: Implement secure key recovery mechanisms
+13. **SDK Consistency**: Ensure all language SDKs follow the same security principles as the TypeScript Client SDK
