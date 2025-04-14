@@ -26,48 +26,108 @@ The TypeScript Client SDK is the cornerstone of NeuralLog's zero-knowledge archi
 
 ### Key Hierarchy
 
-The system uses a structured path hierarchy:
+The system uses a three-tier key hierarchy:
 
 ```
-master_secret
-├── tenant/{tenantId}/encryption
-│   └── Used for encrypting tenant-wide data
-├── tenant/{tenantId}/search
-│   └── Used for generating search tokens
-├── tenant/{tenantId}/user/{userId}/api-key
-│   └── Used for generating API keys
-├── tenant/{tenantId}/user/{userId}/auth
-│   └── Used for user authentication
-├── tenant/{tenantId}/log/{logId}/encryption
-│   └── Used for encrypting log entries
-└── tenant/{tenantId}/log/{logId}/search
-    └── Used for generating log-specific search tokens
+Master Secret (derived from tenant ID and recovery phrase)
+└── Master KEK (derived from Master Secret)
+    └── Operational KEKs (versioned, derived from Master KEK)
+        ├── Log Name Keys (derived from Operational KEK)
+        │   └── Used for encrypting log names
+        ├── Log Encryption Keys (derived from Operational KEK)
+        │   └── Used for encrypting log data
+        └── Search Keys (derived from Operational KEK)
+            └── Used for generating search tokens
 ```
 
-### Key Derivation Function
+This hierarchy enables:
+1. Secure key rotation through KEK versioning
+2. Tenant-wide consistent encryption
+3. Secure distribution of keys through encrypted KEK blobs
 
-Keys are derived using HKDF (HMAC-based Key Derivation Function):
+### Key Derivation Functions
+
+Different key derivation functions are used at each level of the hierarchy:
+
+#### Master Secret Derivation
 
 ```javascript
-async function deriveKey(masterSecret, path) {
-  // Convert master secret to a seed
-  const seed = await crypto.subtle.importKey(
-    "raw",
-    masterSecret,
-    { name: "HKDF" },
+async function deriveMasterSecret(tenantId, recoveryPhrase) {
+  // Create salt from tenant ID
+  const salt = `NeuralLog-${tenantId}-MasterSecret`;
+
+  // Derive key using PBKDF2
+  const passwordBytes = new TextEncoder().encode(recoveryPhrase);
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    passwordBytes,
+    { name: 'PBKDF2' },
     false,
-    ["deriveBits"]
+    ['deriveBits']
   );
 
-  // Derive key using HKDF
   return crypto.subtle.deriveBits(
     {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: new TextEncoder().encode(path),
-      info: new TextEncoder().encode("neurallog-key")
+      name: 'PBKDF2',
+      salt: new TextEncoder().encode(salt),
+      iterations: 100000,
+      hash: 'SHA-256'
     },
-    seed,
+    keyMaterial,
+    256
+  );
+}
+```
+
+#### Master KEK Derivation
+
+```javascript
+async function deriveMasterKEK(masterSecret) {
+  // Import master secret as key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    masterSecret,
+    { name: 'HKDF' },
+    false,
+    ['deriveBits']
+  );
+
+  // Derive bits using HKDF
+  return crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new TextEncoder().encode('NeuralLog-MasterKEK'),
+      info: new TextEncoder().encode('master-key-encryption-key')
+    },
+    keyMaterial,
+    256
+  );
+}
+```
+
+#### Operational KEK Derivation
+
+```javascript
+async function deriveOperationalKEK(masterKEK, version) {
+  // Import master KEK as key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    masterKEK,
+    { name: 'HKDF' },
+    false,
+    ['deriveBits']
+  );
+
+  // Derive bits using HKDF
+  return crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new TextEncoder().encode(`NeuralLog-OpKEK-${version}`),
+      info: new TextEncoder().encode('operational-key-encryption-key')
+    },
+    keyMaterial,
     256
   );
 }
@@ -77,11 +137,12 @@ async function deriveKey(masterSecret, path) {
 
 The master secret can be managed in several ways:
 
-### 1. Password-Based
+### 1. Recovery Phrase
 
 For individual users or small teams:
-- Master secret derived from a strong password
-- Can be regenerated anytime with the same password
+- Master secret derived from tenant ID and recovery phrase
+- Recovery phrase can be a BIP-39 mnemonic (12-24 words)
+- Can be regenerated anytime with the same recovery phrase
 - Suitable for development environments
 
 ### 2. M-of-N Secret Sharing
@@ -90,6 +151,7 @@ For organizations with multiple administrators:
 - Master secret split using Shamir's Secret Sharing
 - Requires M of N shares to reconstruct
 - Provides redundancy and security
+- Used for admin promotion and key recovery
 - Suitable for production environments
 
 ### 3. Hardware Security Module (HSM)
@@ -227,6 +289,34 @@ async function deriveSearchKey(apiKey, tenantId) {
 
 The Redis instance for each tenant stores key metadata:
 
+### KEK Version Storage
+
+```
+kek:version:{tenantId}:{versionId} -> {
+  "createdAt": "2023-06-01T12:00:00Z",
+  "createdBy": "user123",
+  "status": "active",  // or "decrypt-only", "deprecated"
+  "reason": "Initial setup",
+  "tenantId": "tenant456"
+}
+
+kek:versions:{tenantId} -> ["versionId1", "versionId2", "versionId3"]
+```
+
+### KEK Blob Storage
+
+```
+kek:blob:{tenantId}:{userId}:{versionId} -> {
+  "encryptedBlob": "base64encodedblob",
+  "createdAt": "2023-06-01T12:00:00Z",
+  "updatedAt": "2023-06-01T12:00:00Z"
+}
+
+kek:blobs:{tenantId}:{userId} -> ["versionId1", "versionId2"]
+```
+
+### API Key Storage
+
 ```
 tenant:{tenantId}:apikey:{keyId} -> {
   "userId": "user123",
@@ -243,6 +333,14 @@ tenant:{tenantId}:revoked:apikeys -> ["keyId1"]
 ## Key Rotation
 
 Keys can be rotated while maintaining backward compatibility:
+
+### KEK Version Rotation
+
+1. Admin creates a new KEK version with status "active"
+2. All existing active KEK versions are changed to "decrypt-only"
+3. Admin provisions the new KEK version for authorized users
+4. New logs are encrypted with the new KEK version
+5. Old logs can still be decrypted using the appropriate KEK version
 
 ### API Key Rotation
 

@@ -9,11 +9,13 @@ This specification defines the comprehensive security model for the NeuralLog pl
 The TypeScript Client SDK is the cornerstone of NeuralLog's security architecture. It implements a true zero-knowledge approach where:
 
 1. **All encryption and decryption happens client-side**: The server never sees plaintext data
-2. **Passwords never leave the client**: Authentication is handled through secure key derivation
-3. **API keys contain cryptographic material**: Used to derive encryption keys for logs
-4. **Search tokens are generated client-side**: Enabling search without revealing content
+2. **Recovery phrases and passwords never leave the client**: Authentication and key derivation happen client-side
+3. **Hierarchical key system**: Master Secret → Master KEK → Operational KEKs → Log Keys
+4. **KEK versioning**: Supports secure key rotation without re-encrypting all data
+5. **Encrypted KEK blobs**: Secure distribution of keys to authorized users
+6. **Search tokens are generated client-side**: Enabling search without revealing content
 
-This client-centric approach means that even if the entire server infrastructure were compromised, an attacker would still be unable to read logs without the proper API keys or master secrets.
+This client-centric approach means that even if the entire server infrastructure were compromised, an attacker would still be unable to read logs without the proper recovery phrases or KEK blobs.
 
 ## Security Architecture
 
@@ -257,10 +259,21 @@ async function authorizeApiRequest(req, res, next) {
 
 NeuralLog implements a true zero-knowledge encryption model through the TypeScript Client SDK:
 
+- **Key Hierarchy**:
+  - **Master Secret**: Derived from tenant ID and recovery phrase, never stored
+  - **Master KEK**: Derived from Master Secret, used to encrypt/decrypt Operational KEKs
+  - **Operational KEKs**: Versioned keys used for actual data encryption/decryption
+  - **Log Keys**: Derived from Operational KEKs, specific to each log
+
+- **KEK Versioning**:
+  - Support for multiple KEK versions (active, decrypt-only, deprecated)
+  - Secure key rotation without re-encrypting existing data
+  - Version information stored with encrypted data
+
 - **Client-Side Encryption**:
   - All encryption happens client-side via the TypeScript Client SDK
   - Log names and log data are both encrypted before transmission
-  - Encryption keys are derived from API keys and never leave the client
+  - Encryption keys are derived from the key hierarchy and never leave the client
   - Search tokens are generated client-side for searchable encryption
 
 - **Data in Transit**:
@@ -271,7 +284,8 @@ NeuralLog implements a true zero-knowledge encryption model through the TypeScri
 - **Data at Rest**:
   - Only encrypted data is stored on the server
   - The server never possesses encryption keys
-  - Even metadata is encrypted when sensitive
+  - Even metadata (including log names) is encrypted
+  - KEK blobs are stored encrypted with user-specific keys
 
 - **End-to-End Encryption**:
   - True end-to-end encryption for all log data

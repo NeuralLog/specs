@@ -16,17 +16,17 @@ NeuralLog implements a novel searchable encryption scheme that enables powerful 
 
 ### Token Generation
 
-Search tokens are generated using HMAC with tenant-specific search keys:
+Search tokens are generated using HMAC with search keys derived from the Operational KEK:
 
 ```javascript
-async function generateSearchTokens(content, searchKey, tenantId) {
+async function generateSearchTokens(content, searchKey, kekVersion) {
   // Extract searchable terms
   const terms = extractSearchableTerms(content);
 
   // For each term, generate a deterministic but secure token
   return Promise.all(terms.map(async term => {
-    // Important: Combine the term with tenant ID to ensure tenant isolation
-    const tokenInput = `${tenantId}:${term.toLowerCase().trim()}`;
+    // Important: Normalize the term
+    const normalizedTerm = term.toLowerCase().trim();
 
     // Generate HMAC token
     const encoder = new TextEncoder();
@@ -41,11 +41,41 @@ async function generateSearchTokens(content, searchKey, tenantId) {
     const signature = await crypto.subtle.sign(
       "HMAC",
       keyData,
-      encoder.encode(tokenInput)
+      encoder.encode(normalizedTerm)
     );
 
-    return arrayBufferToBase64(signature);
+    // Include KEK version with the token
+    return {
+      token: arrayBufferToBase64(signature),
+      kekVersion
+    };
   }));
+}
+
+// Derive search key from Operational KEK
+async function deriveSearchKey(operationalKEK) {
+  // Import operational KEK as key material
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    operationalKEK,
+    { name: 'HKDF' },
+    false,
+    ['deriveBits']
+  );
+
+  // Derive bits using HKDF
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt: new TextEncoder().encode('NeuralLog-SearchKey'),
+      info: new TextEncoder().encode('search-tokens')
+    },
+    keyMaterial,
+    256
+  );
+
+  return new Uint8Array(derivedBits);
 }
 ```
 
@@ -103,27 +133,72 @@ Searching is performed by generating tokens from the search query:
 
 ```javascript
 // Client-side
-async function search(query, searchKey, tenantId) {
-  // Generate search tokens from the query
-  const searchTokens = await generateSearchTokens({ query }, searchKey, tenantId);
+async function search(query, logName) {
+  try {
+    // Encrypt the log name
+    const encryptedLogName = await this.cryptoService.encryptLogName(logName);
 
-  // Send search request to server
-  const response = await fetch(`/api/logs/search`, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${authToken}`,
-      'X-Tenant-ID': tenantId
-    },
-    body: JSON.stringify({
-      tokens: searchTokens
-    })
-  });
+    // Get a resource token for the log
+    const resourceToken = await this.authService.getResourceToken(
+      `logs/${encryptedLogName}`,
+      this.authManager.getAuthCredential()
+    );
 
-  // Get encrypted log entries
-  const { entries } = await response.json();
+    // Get all available KEK versions
+    const kekVersions = Array.from(this.cryptoService.getOperationalKEKs().keys());
 
-  // Decrypt entries client-side
-  return await decryptLogEntries(entries, encryptionKey);
+    // Generate search tokens for each KEK version
+    const allTokens = [];
+
+    for (const kekVersion of kekVersions) {
+      // Derive the search key for this version
+      const searchKey = await this.cryptoService.deriveSearchKey(kekVersion);
+
+      // Generate tokens
+      const tokens = await this.cryptoService.generateSearchTokens(
+        { query },
+        searchKey,
+        kekVersion
+      );
+
+      allTokens.push(...tokens);
+    }
+
+    // Send search request to server
+    const response = await this.logsService.searchLogs(
+      encryptedLogName,
+      allTokens,
+      resourceToken
+    );
+
+    // Decrypt entries client-side
+    const decryptedLogs = await Promise.all(
+      response.map(async (log) => {
+        try {
+          const decryptedData = await this.cryptoService.decryptLogData(log.data);
+          return {
+            id: log.id,
+            timestamp: log.timestamp,
+            data: decryptedData
+          };
+        } catch (error) {
+          console.error(`Failed to decrypt log ${log.id}:`, error);
+          return {
+            id: log.id,
+            timestamp: log.timestamp,
+            data: { error: 'Failed to decrypt log data' }
+          };
+        }
+      })
+    );
+
+    return decryptedLogs;
+  } catch (error) {
+    throw new LogError(
+      `Failed to search logs: ${error instanceof Error ? error.message : String(error)}`,
+      'search_logs_failed'
+    );
+  }
 }
 
 // Server-side
@@ -167,40 +242,67 @@ async function handleSearchRequest(req, res) {
 
 ## Tenant-Consistent Search Keys
 
-To enable multiple users in the same tenant to search the same logs:
+To enable multiple users in the same tenant to search the same logs, all users in a tenant have access to the same KEK versions through encrypted KEK blobs:
 
 ```javascript
 // Client-side
-async function deriveSearchKey(apiKey, tenantId) {
-  // 1. First derive a user-specific key from the API key
-  const userKey = await deriveUserKey(apiKey);
+async function initializeKeyHierarchy() {
+  try {
+    // Get KEK blobs for the current user
+    const kekBlobs = await this.kekService.getUserKEKBlobs(
+      this.authManager.getAuthCredential()
+    );
 
-  // 2. Use the user key to authenticate to the server
-  const response = await fetch('/api/tenant/search-key-material', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'X-Tenant-ID': tenantId
+    // Decrypt each KEK blob
+    for (const blob of kekBlobs) {
+      try {
+        // Parse the encrypted blob
+        const parsedBlob = JSON.parse(blob.encryptedBlob);
+
+        // Decrypt the operational KEK
+        const operationalKEK = this.base64ToArrayBuffer(parsedBlob.data);
+
+        // Store the operational KEK
+        this.operationalKEKs.set(blob.kekVersionId, new Uint8Array(operationalKEK));
+
+        // Set the current KEK version if not set or if this is a newer version
+        if (!this.currentKEKVersion ||
+            (blob.kekVersionId > this.currentKEKVersion &&
+             await this.kekService.isKEKVersionActive(blob.kekVersionId, this.authManager.getAuthCredential()))) {
+          this.currentKEKVersion = blob.kekVersionId;
+        }
+      } catch (error) {
+        console.error(`Failed to decrypt KEK blob for version ${blob.kekVersionId}:`, error);
+      }
     }
+
+    if (!this.currentKEKVersion) {
+      throw new Error('No valid KEK version found');
+    }
+  } catch (error) {
+    throw new LogError(
+      `Failed to initialize key hierarchy: ${error instanceof Error ? error.message : String(error)}`,
+      'initialize_key_hierarchy_failed'
+    );
+  }
+}
+
+// Derive search key from the operational KEK
+async function deriveSearchKey(kekVersion) {
+  // Get the operational KEK for this version
+  const operationalKEK = this.getOperationalKEK(kekVersion);
+
+  if (!operationalKEK) {
+    throw new Error(`Operational KEK not found for version ${kekVersion}`);
+  }
+
+  // Derive the search key
+  return await KeyDerivation.deriveKeyWithHKDF(operationalKEK, {
+    salt: 'NeuralLog-SearchKey',
+    info: 'search-tokens',
+    hash: 'SHA-256',
+    keyLength: 256
   });
-
-  // 3. Get tenant-specific key material (same for all tenant users)
-  const { keyMaterial } = await response.json();
-
-  // 4. Combine user key with tenant key material
-  // This produces the same search key for all users in the tenant
-  return await crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: hexToArrayBuffer(keyMaterial),
-      info: new TextEncoder().encode("search-key")
-    },
-    userKey,
-    { name: "HMAC", hash: "SHA-256", length: 256 },
-    true,
-    ["sign"]
-  );
 }
 ```
 

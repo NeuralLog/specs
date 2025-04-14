@@ -130,11 +130,13 @@ The API Layer provides interfaces for interacting with the system.
 ## Cross-Cutting Concerns
 
 ### Zero-Knowledge Security
-- Client-side encryption for all data
-- Deterministic hierarchical key derivation
+- Client-side encryption for all data using a hierarchical key system
+- Three-tier key hierarchy: Master Secret → Master KEK → Operational KEKs
+- KEK versioning for secure key rotation
+- Encrypted KEK blobs for secure key distribution
 - Searchable encryption for encrypted data
 - Zero server knowledge of plaintext or keys
-- M-of-N key sharing for administrative access
+- Shamir's Secret Sharing (M-of-N) for administrative key recovery
 - Complete tenant isolation through cryptography
 
 ### Scalability
@@ -185,16 +187,21 @@ The API Layer provides interfaces for interacting with the system.
 
 ## Zero-Knowledge Data Flow
 
-1. Client application generates log data
-2. SDK encrypts log content client-side using derived encryption keys
-3. SDK generates search tokens for searchable terms
-4. Encrypted logs and search tokens are sent to the server
-5. Server stores encrypted logs and indexes search tokens
-6. Server performs analysis on search tokens without decryption
-7. Client requests logs with search queries
-8. Server matches search tokens and returns encrypted logs
-9. Client decrypts logs client-side for viewing
-10. Zero-knowledge reports are generated from token patterns
+1. Client application initializes with recovery phrase or mnemonic
+2. Master Secret is derived from tenant ID and recovery phrase
+3. Master KEK is derived from Master Secret
+4. Operational KEKs are derived from Master KEK for each KEK version
+5. Client application generates log data
+6. Log name is encrypted using a key derived from the Operational KEK
+7. Log data is encrypted using a key derived from the Operational KEK
+8. SDK generates search tokens for searchable terms
+9. Encrypted logs, KEK version information, and search tokens are sent to the server
+10. Server stores encrypted logs and indexes search tokens without ability to decrypt
+11. Server performs analysis on search tokens without decryption
+12. Client requests logs with search queries
+13. Server matches search tokens and returns encrypted logs
+14. Client decrypts logs using the appropriate Operational KEK based on version information
+15. Zero-knowledge reports are generated from token patterns
 
 ## Performance Considerations
 
