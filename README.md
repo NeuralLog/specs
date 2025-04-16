@@ -114,13 +114,38 @@ For more information, see the [TypeScript Client SDK documentation](typescript-c
 
 ## Documentation
 
-The documentation is available in the `docs` directory. To run the documentation site locally:
+Detailed documentation is available in the [docs](./docs) directory:
+
+- [API Reference](./docs/api.md)
+- [Configuration](./docs/configuration.md)
+- [Architecture](./docs/architecture.md)
+- [Examples](./docs/examples)
+
+The central documentation is available in the `docs` repository. To run the documentation site locally:
 
 ```powershell
-cd docs/NeuralLog\ Docs
+cd docs
 npm install
 npm start
 ```
+
+For integration guides and tutorials, visit the [NeuralLog Documentation Site](https://neurallog.github.io/docs/).
+
+## Contributing
+
+Contributions are welcome! Please read our [Contributing Guide](./CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+
+## Related NeuralLog Components
+
+- [NeuralLog Auth](https://github.com/NeuralLog/auth) - Authentication and authorization
+- [NeuralLog Server](https://github.com/NeuralLog/server) - Core server functionality
+- [NeuralLog Web](https://github.com/NeuralLog/web) - Web interface components
+- [NeuralLog TypeScript Client SDK](https://github.com/NeuralLog/typescript-client-sdk) - TypeScript client SDK
+- [NeuralLog Java Client SDK](https://github.com/NeuralLog/Java-client-sdk) - Java client SDK
+- [NeuralLog Python SDK](https://github.com/NeuralLog/python) - Python SDK
+- [NeuralLog C# SDK](https://github.com/NeuralLog/csharp) - C# SDK
+- [NeuralLog Go SDK](https://github.com/NeuralLog/go) - Go SDK
+- [NeuralLog Infra](https://github.com/NeuralLog/infra) - Infrastructure configuration
 
 ## License
 
